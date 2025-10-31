@@ -1,0 +1,27 @@
+{
+    "pack_id": "pack_sales_quality",
+    "source": {
+      "type": "file",
+      "name": "reference_sales",
+      "config": {
+        "path": "sample_data/reference_sales_data.csv",
+        "format": "csv",
+        "options": {
+          "delimiter": ",",
+          "encoding": "utf-8"
+        }
+      }
+    },
+    "target": {
+      "type": "file",
+      "name": "current_sales",
+      "config": {
+        "path": "sample_data/current_sales_data.csv",
+        "format": "csv",
+        "options": {
+          "delimiter": ",",
+          "encoding": "utf-8"
+        }
+      }
+    }
+  }

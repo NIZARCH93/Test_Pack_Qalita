@@ -1,0 +1,12 @@
+id: pack_sales_quality
+version: 0.1.0
+title: Contrôles qualité des ventes
+description: >-
+  Vérifie des règles de qualité de base sur un dataset de commandes (présence des colonnes,
+  valeurs nulles, montants positifs, statuts valides et doublons).
+tags:
+  - sales
+  - data-quality
+owner: data-quality-team
+created_at: 2024-01-01
+updated_at: 2024-01-01

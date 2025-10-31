@@ -1,0 +1,7 @@
+order_id,customer_id,order_date,amount,status
+1001,C001,2023-02-10,250.00,Completed
+1002,C002,2023-02-11,0.00,Completed
+1003,,2023-02-12,110.00,Pending
+1003,C006,2023-02-13,75.00,Completed
+1004,C004,,420.00,Cancelled
+1006,C007,2023-02-15,-35.00,Refunded

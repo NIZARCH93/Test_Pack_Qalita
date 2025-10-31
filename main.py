@@ -1,143 +1,192 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # coding: utf-8
+"""Pack QALITA : contrôles qualité simples sur des données de ventes."""
 
-# In[1]:
+from __future__ import annotations
 
+from typing import Any, Dict, Iterable
 
-from qalita_core.pack import Pack
-import pandas as pd
 import numpy as np
+import pandas as pd
+from qalita_core.pack import Pack
+
+EXPECTED_COLUMNS: Iterable[str] = [
+    "order_id",
+    "customer_id",
+    "order_date",
+    "amount",
+    "status",
+]
+ESSENTIAL_COLUMNS: Iterable[str] = ["order_id", "customer_id", "order_date", "amount"]
+VALID_STATUSES = {"Pending", "Completed", "Cancelled"}
 
 pack = Pack()
 
-# --- Chargement des données (source = référence, target = actuel) ---
-# Supporte database via table_or_query ou des fichiers (CSV/Parquet)
-if pack.source_config.get("type") == "database":
-    table_or_query = pack.source_config.get("config", {}).get("table_or_query")
-    if not table_or_query:
-        raise ValueError("For a 'database' type source, you must specify 'table_or_query' in the config.")
-    pack.load_data("source", table_or_query=table_or_query)
-else:
-    pack.load_data("source")
 
-if pack.target_config.get("type") == "database":
-    table_or_query = pack.target_config.get("config", {}).get("table_or_query")
-    if not table_or_query:
-        raise ValueError("For a 'database' type target, you must specify 'table_or_query' in the config.")
-    pack.load_data("target", table_or_query=table_or_query)
-else:
-    pack.load_data("target")
+def _normalise_dataframe(data: Any) -> pd.DataFrame:
+    """Transforme la donnée renvoyée par QALITA en DataFrame pandas."""
+    if isinstance(data, list) and data:
+        data = data[0]
 
-# Fonction utilitaire pour lire parquet si on passe un path
-def _load_parquet_if_path(obj):
+    if isinstance(data, str):
+        lower = data.lower()
+        if lower.endswith((".parquet", ".pq")):
+            return pd.read_parquet(data, engine="pyarrow")
+        if lower.endswith(".csv"):
+            return pd.read_csv(data)
+
+    if isinstance(data, pd.DataFrame):
+        return data.copy()
+
+    if data is None:
+        return pd.DataFrame()
+
     try:
-        if isinstance(obj, str) and obj.lower().endswith((".parquet", ".pq")):
-            return pd.read_parquet(obj, engine="pyarrow")
+        return pd.DataFrame(data)
     except Exception:
-        pass
-    return obj
+        return pd.DataFrame()
 
-ref_df = pack.df_source
-cur_df = pack.df_target
 
-# si pack.df_* est une liste (certains loaders renvoient une liste), on prend le premier élément
-if isinstance(ref_df, list) or isinstance(cur_df, list):
-    ref_df = _load_parquet_if_path(ref_df[0] if isinstance(ref_df, list) else ref_df)
-    cur_df = _load_parquet_if_path(cur_df[0] if isinstance(cur_df, list) else cur_df)
-else:
-    ref_df = _load_parquet_if_path(ref_df)
-    cur_df = _load_parquet_if_path(cur_df)
+def _load_dataframe(role: str) -> pd.DataFrame:
+    """Charge un DataFrame via l'API Pack de QALITA."""
+    config: Dict[str, Any] = getattr(pack, f"{role}_config", None) or {}
+    if not config:
+        return pd.DataFrame()
 
-# --- Définitions des checks spécifiques au pack sales ---
-# Colonnes attendues
-expected_columns = ["order_id", "customer_id", "order_date", "amount", "status"]
+    if config.get("type") == "database":
+        table_or_query = config.get("config", {}).get("table_or_query")
+        if not table_or_query:
+            raise ValueError(
+                f"For a 'database' type {role}, you must specify 'table_or_query' in the config."
+            )
+        pack.load_data(role, table_or_query=table_or_query)
+    else:
+        pack.load_data(role)
 
-# 1) Not-null checks sur colonnes essentielles
-essential_cols = ["order_id", "customer_id", "order_date", "amount"]
-for col in essential_cols:
-    if col not in cur_df.columns:
-        pack.metrics.data.append({
-            "key": "missing_column",
-            "value": f"{col} not present",
-            "scope": {"perimeter": "dataset", "value": pack.target_config.get("name", "target")}
-        })
+    return _normalise_dataframe(getattr(pack, f"df_{role}"))
+
+
+def _dataset_scope(dataset_name: str) -> Dict[str, Any]:
+    return {"perimeter": "dataset", "value": dataset_name}
+
+
+def _column_scope(dataset_name: str, column: str) -> Dict[str, Any]:
+    return {
+        "perimeter": "column",
+        "value": column,
+        "parent_scope": _dataset_scope(dataset_name),
+    }
+
+
+def _add_metric(key: str, value: str, scope: Dict[str, Any]) -> None:
+    pack.metrics.data.append({"key": key, "value": value, "scope": scope})
+
+
+reference_df = _load_dataframe("source")
+current_df = _load_dataframe("target")
+
+# Normalise également si QALITA a directement fourni les dataframes
+reference_df = _normalise_dataframe(reference_df)
+current_df = _normalise_dataframe(current_df)
+
+target_name = (pack.target_config or {}).get("name", "target")
+dataset_scope = _dataset_scope(target_name)
+
+_add_metric("row_count", str(len(current_df)), dataset_scope)
+
+expected_missing = sorted(set(EXPECTED_COLUMNS) - set(current_df.columns))
+_add_metric(
+    "missing_expected_columns",
+    ", ".join(expected_missing) if expected_missing else "none",
+    dataset_scope,
+)
+
+for column in ESSENTIAL_COLUMNS:
+    if column not in current_df.columns:
+        _add_metric(
+            "missing_column",
+            f"{column} not present",
+            dataset_scope,
+        )
         continue
-    null_count = int(cur_df[col].isna().sum())
-    pack.metrics.data.append({
-        "key": "null_count",
-        "value": str(null_count),
-        "scope": {"perimeter": "column", "value": col, "parent_scope": {"perimeter": "dataset", "value": pack.target_config.get("name", "target")}}
-    })
 
-# 2) Montants positifs (amount > 0)
-if "amount" in cur_df.columns:
-    neg_amount_count = int((cur_df["amount"] <= 0).sum())
-    pack.metrics.data.append({
-        "key": "negative_amount_count",
-        "value": str(neg_amount_count),
-        "scope": {"perimeter": "column", "value": "amount", "parent_scope": {"perimeter": "dataset", "value": pack.target_config.get("name", "target")}}
-    })
+    null_count = int(current_df[column].isna().sum())
+    _add_metric("null_count", str(null_count), _column_scope(target_name, column))
 
-# 3) Statuts valides (Pending, Completed, Cancelled)
-valid_statuses = {"Pending", "Completed", "Cancelled"}
-if "status" in cur_df.columns:
-    invalid_statuses = cur_df[~cur_df["status"].isin(valid_statuses)]["status"].dropna().unique().tolist()
-    pack.metrics.data.append({
-        "key": "invalid_status_values",
-        "value": ", ".join(map(str, invalid_statuses)) if invalid_statuses else "none",
-        "scope": {"perimeter": "column", "value": "status", "parent_scope": {"perimeter": "dataset", "value": pack.target_config.get("name", "target")}}
-    })
+neg_amount_count = 0
+if "amount" in current_df.columns:
+    neg_amount_count = int((current_df["amount"] <= 0).sum())
+    _add_metric(
+        "non_positive_amount_count",
+        str(neg_amount_count),
+        _column_scope(target_name, "amount"),
+    )
 
-# 4) Doublons sur order_id
-if "order_id" in cur_df.columns:
-    dup_count = int(cur_df.duplicated(subset=["order_id"]).sum())
-    pack.metrics.data.append({
-        "key": "duplicate_order_id_count",
-        "value": str(dup_count),
-        "scope": {"perimeter": "column", "value": "order_id", "parent_scope": {"perimeter": "dataset", "value": pack.target_config.get("name", "target")}}
-    })
+invalid_statuses: Iterable[str] = []
+if "status" in current_df.columns:
+    invalid = current_df.loc[~current_df["status"].isin(VALID_STATUSES), "status"].dropna().unique()
+    invalid_statuses = sorted(map(str, invalid))
+    _add_metric(
+        "invalid_status_values",
+        ", ".join(invalid_statuses) if invalid_statuses else "none",
+        _column_scope(target_name, "status"),
+    )
 
-# 5) Simple "score" synthétique (exemple)
-# On combine règles : si aucun null sur essential_cols, aucun montant <=0, aucun duplicat et aucun status invalide => score = 1
+duplicate_order_count = 0
+if "order_id" in current_df.columns:
+    duplicate_order_count = int(current_df.duplicated(subset=["order_id"]).sum())
+    _add_metric(
+        "duplicate_order_id_count",
+        str(duplicate_order_count),
+        _column_scope(target_name, "order_id"),
+    )
+
+if not reference_df.empty:
+    _add_metric(
+        "row_count_delta_vs_reference",
+        str(len(current_df) - len(reference_df)),
+        dataset_scope,
+    )
+
+    if "order_id" in current_df.columns and "order_id" in reference_df.columns:
+        current_ids = set(current_df["order_id"].dropna().astype(str))
+        reference_ids = set(reference_df["order_id"].dropna().astype(str))
+        new_orders = sorted(current_ids - reference_ids)
+        missing_orders = sorted(reference_ids - current_ids)
+        _add_metric(
+            "new_order_ids",
+            ", ".join(new_orders) if new_orders else "none",
+            dataset_scope,
+        )
+        _add_metric(
+            "missing_order_ids",
+            ", ".join(missing_orders) if missing_orders else "none",
+            dataset_scope,
+        )
+
 score_components = []
-# null checks: consider passed if null_count == 0 for essential cols present
-for col in essential_cols:
-    if col in cur_df.columns:
-        score_components.append(1.0 if int(cur_df[col].isna().sum()) == 0 else 0.0)
+for column in ESSENTIAL_COLUMNS:
+    if column in current_df.columns:
+        score_components.append(1.0 if int(current_df[column].isna().sum()) == 0 else 0.0)
     else:
         score_components.append(0.0)
 
-# amount positive
-if "amount" in cur_df.columns:
-    score_components.append(1.0 if (cur_df["amount"] > 0).all() else 0.0)
+if "amount" in current_df.columns:
+    score_components.append(1.0 if (current_df["amount"] > 0).all() else 0.0)
 else:
     score_components.append(0.0)
 
-# duplicates
-if "order_id" in cur_df.columns:
-    score_components.append(1.0 if dup_count == 0 else 0.0)
+if "order_id" in current_df.columns:
+    score_components.append(1.0 if duplicate_order_count == 0 else 0.0)
 else:
     score_components.append(0.0)
 
-# status
-if "status" in cur_df.columns:
-    score_components.append(1.0 if len(invalid_statuses) == 0 else 0.0)
+if "status" in current_df.columns:
+    score_components.append(1.0 if not invalid_statuses else 0.0)
 else:
     score_components.append(0.0)
 
-score = float(np.mean(score_components))
-pack.metrics.data.append({
-    "key": "score",
-    "value": str(round(score, 2)),
-    "scope": {"perimeter": "dataset", "value": pack.target_config.get("name", "target")}
-})
+score = float(np.mean(score_components)) if score_components else 0.0
+_add_metric("score", str(round(score, 2)), dataset_scope)
 
-# Sauvegarde des métriques
 pack.metrics.save()
-
-
-# In[ ]:
-
-
-
-
